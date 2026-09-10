@@ -11,7 +11,10 @@ const reviewsRoute = require('./routes/reviews');
 const settingsRoute = require('./routes/settings');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: '*', // Sab origins allow ho jayein ge
+  credentials: true
+}));
 app.use(express.json());
 
 app.use('/api/factories', factoriesRoute);
