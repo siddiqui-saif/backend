@@ -30,7 +30,7 @@ router.get('/', async (req, res) => {
       product.sizes = sizesResult.rows;
 
       const imagesResult = await pool.query(
-        'SELECT id, image_url FROM product_images WHERE product_id = $1',
+        'SELECT id, image_url, color FROM product_images WHERE product_id = $1 ORDER BY id',
         [product.id]
       );
       product.images = imagesResult.rows;
@@ -67,7 +67,7 @@ router.get('/admin/all', verifyAdmin, async (req, res) => {
       product.sizes = sizesResult.rows;
 
       const imagesResult = await pool.query(
-        'SELECT id, image_url FROM product_images WHERE product_id = $1',
+        'SELECT id, image_url, color FROM product_images WHERE product_id = $1 ORDER BY id',
         [product.id]
       );
       product.images = imagesResult.rows;
@@ -96,7 +96,7 @@ router.get('/:id', async (req, res) => {
     product.sizes = sizesResult.rows;
 
     const imagesResult = await pool.query(
-      'SELECT id, image_url FROM product_images WHERE product_id = $1',
+      'SELECT id, image_url, color FROM product_images WHERE product_id = $1 ORDER BY id',
       [id]
     );
     product.images = imagesResult.rows;
@@ -162,14 +162,14 @@ router.patch('/:id/stock', verifyAdmin, async (req, res) => {
     const { size, color, stock_qty } = req.body;
 
     const existing = await pool.query(
-      'SELECT * FROM product_sizes WHERE product_id = $1 AND size = $2 AND color = $3',
+      'SELECT * FROM product_sizes WHERE product_id = $1 AND size = $2 AND color IS NOT DISTINCT FROM $3',
       [id, size, color]
     );
 
     let result;
     if (existing.rows.length > 0) {
       result = await pool.query(
-        'UPDATE product_sizes SET stock_qty = $1 WHERE product_id = $2 AND size = $3 AND color = $4 RETURNING *',
+        'UPDATE product_sizes SET stock_qty = $1 WHERE product_id = $2 AND size = $3 AND color IS NOT DISTINCT FROM $4 RETURNING *',
         [stock_qty, id, size, color]
       );
     } else {
@@ -230,10 +230,11 @@ router.patch('/:id/activate', verifyAdmin, async (req, res) => {
   }
 });
 
-// Photo upload karna - PROTECTED
+// Photo upload karna (color ke sath) - PROTECTED
 router.post('/:id/images', verifyAdmin, upload.single('image'), async (req, res) => {
   try {
     const { id } = req.params;
+    const { color } = req.body;
 
     if (!req.file) {
       return res.status(400).json({ error: 'No image provided' });
@@ -242,8 +243,8 @@ router.post('/:id/images', verifyAdmin, upload.single('image'), async (req, res)
     const imageUrl = req.file.path;
 
     const result = await pool.query(
-      'INSERT INTO product_images (product_id, image_url) VALUES ($1, $2) RETURNING *',
-      [id, imageUrl]
+      'INSERT INTO product_images (product_id, image_url, color) VALUES ($1, $2, $3) RETURNING *',
+      [id, imageUrl, color || null]
     );
 
     res.json(result.rows[0]);
