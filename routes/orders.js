@@ -7,7 +7,7 @@ const verifyAdmin = require('../middleware/auth');
 router.post('/', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { customer_name, phone, address, payment_method, source, items, customer_id } = req.body;
+    const { customer_name, phone, address, payment_method, source, items, customer_id, coupon_code, discount_amount } = req.body;
 
     await client.query('BEGIN');
 
@@ -16,10 +16,13 @@ router.post('/', async (req, res) => {
       total += item.price * item.quantity;
     }
 
+    const finalDiscount = discount_amount || 0;
+    const finalTotal = Math.max(0, total - finalDiscount);
+
     const orderResult = await client.query(
-      `INSERT INTO orders (customer_id, customer_name, phone, address, payment_method, source, total_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [customer_id || null, customer_name, phone, address, payment_method || 'COD', source || 'Website', total]
+      `INSERT INTO orders (customer_id, customer_name, phone, address, payment_method, source, total_amount, coupon_code, discount_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [customer_id || null, customer_name, phone, address, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount]
     );
     const newOrder = orderResult.rows[0];
 
@@ -39,6 +42,19 @@ router.post('/', async (req, res) => {
 
       if (stockCheck.rows.length === 0 || stockCheck.rows[0].stock_qty < 0) {
         throw new Error(`Out of stock: Product ${item.product_id}, Size ${item.size}`);
+      }
+    }
+
+    // Agar coupon use hua, uska usage record karna
+    if (coupon_code) {
+      const couponResult = await client.query('SELECT id FROM coupons WHERE code = $1', [coupon_code.toUpperCase()]);
+      if (couponResult.rows.length > 0) {
+        const couponId = couponResult.rows[0].id;
+        await client.query(
+          'INSERT INTO coupon_usage (coupon_id, customer_id, phone, order_id) VALUES ($1, $2, $3, $4)',
+          [couponId, customer_id || null, phone, newOrder.id]
+        );
+        await client.query('UPDATE coupons SET usage_count = usage_count + 1 WHERE id = $1', [couponId]);
       }
     }
 
@@ -158,6 +174,40 @@ router.patch('/:id/confirm-call', verifyAdmin, async (req, res) => {
   }
 });
 
+// Customer khud delivery confirm kare - PUBLIC
+router.patch('/:id/confirm-delivery', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { phone } = req.body;
+
+    const orderResult = await pool.query('SELECT * FROM orders WHERE id = $1', [id]);
+    if (orderResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const order = orderResult.rows[0];
+
+    if (order.phone !== phone) {
+      return res.status(403).json({ error: 'Phone number does not match this order' });
+    }
+
+    if (order.status === 'Delivered') {
+      return res.status(400).json({ error: 'Order is already marked as delivered' });
+    }
+    if (order.status === 'Cancelled') {
+      return res.status(400).json({ error: 'This order was cancelled' });
+    }
+
+    const result = await pool.query(
+      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
+      ['Delivered', id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Order cancel karna - PROTECTED
 router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
   const client = await pool.connect();
@@ -220,40 +270,6 @@ router.patch('/:id/courier', verifyAdmin, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Order not found' });
     }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Customer khud delivery confirm kare - PUBLIC (phone se verify)
-router.patch('/:id/confirm-delivery', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { phone } = req.body;
-
-    const orderResult = await pool.query('SELECT * FROM orders WHERE id = $1', [id]);
-    if (orderResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
-    const order = orderResult.rows[0];
-
-    if (order.phone !== phone) {
-      return res.status(403).json({ error: 'Phone number does not match this order' });
-    }
-
-    if (order.status === 'Delivered') {
-      return res.status(400).json({ error: 'Order is already marked as delivered' });
-    }
-    if (order.status === 'Cancelled') {
-      return res.status(400).json({ error: 'This order was cancelled' });
-    }
-
-    const result = await pool.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
-      ['Delivered', id]
-    );
 
     res.json(result.rows[0]);
   } catch (err) {
