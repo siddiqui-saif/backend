@@ -9,12 +9,10 @@ const adminRoute = require('./routes/admin');
 const customersRoute = require('./routes/customers');
 const reviewsRoute = require('./routes/reviews');
 const settingsRoute = require('./routes/settings');
+const couponsRoute = require('./routes/coupons');
 
 const app = express();
-app.use(cors({
-  origin: '*', // Sab origins allow ho jayein ge
-  credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 
 app.use('/api/factories', factoriesRoute);
@@ -24,6 +22,7 @@ app.use('/api/admin', adminRoute);
 app.use('/api/customers', customersRoute);
 app.use('/api/reviews', reviewsRoute);
 app.use('/api/settings', settingsRoute);
+app.use('/api/coupons', couponsRoute);
 
 app.get('/', async (req, res) => {
   try {
@@ -34,13 +33,7 @@ app.get('/', async (req, res) => {
   }
 });
 
-// const PORT = process.env.PORT || 5000;
-// app.listen(PORT, () => {
-//   console.log(`Server chal raha hai: http://localhost:${PORT}`);
-// });
-
 const PORT = process.env.PORT || 5000;
-
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+  console.log(`Server chal raha hai: http://localhost:${PORT}`);
 });
