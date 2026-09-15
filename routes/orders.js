@@ -3,7 +3,6 @@ const router = express.Router();
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
 
-// Random tracking code banane ka function (ambiguous characters exclude — O,0,I,1 wagera)
 function generateTrackingCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = 'CHR-';
@@ -17,7 +16,7 @@ function generateTrackingCode() {
 router.post('/', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { customer_name, phone, address, payment_method, source, items, customer_id, coupon_code, discount_amount } = req.body;
+    const { customer_name, phone, address, landmark, payment_method, source, items, customer_id, coupon_code, discount_amount } = req.body;
 
     await client.query('BEGIN');
 
@@ -29,7 +28,6 @@ router.post('/', async (req, res) => {
     const finalDiscount = discount_amount || 0;
     const finalTotal = Math.max(0, total - finalDiscount);
 
-    // Unique tracking code generate karna (agar clash ho to dobara try karega)
     let trackingCode;
     let inserted = false;
     let newOrder;
@@ -39,9 +37,9 @@ router.post('/', async (req, res) => {
       trackingCode = generateTrackingCode();
       try {
         const orderResult = await client.query(
-          `INSERT INTO orders (customer_id, customer_name, phone, address, payment_method, source, total_amount, coupon_code, discount_amount, status, tracking_code)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-          [customer_id || null, customer_name, phone, address, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount, 'Order Placed', trackingCode]
+          `INSERT INTO orders (customer_id, customer_name, phone, address, landmark, payment_method, source, total_amount, coupon_code, discount_amount, status, tracking_code)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+          [customer_id || null, customer_name, phone, address, landmark || null, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount, 'Order Placed', trackingCode]
         );
         newOrder = orderResult.rows[0];
         inserted = true;
@@ -276,7 +274,7 @@ router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
   }
 });
 
-// Courier/tracking details add karna aur estimated delivery date - PROTECTED
+// Courier/tracking details add karna - PROTECTED
 router.patch('/:id/courier', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
