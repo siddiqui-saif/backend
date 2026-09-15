@@ -3,6 +3,16 @@ const router = express.Router();
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
 
+// Random tracking code banane ka function (ambiguous characters exclude — O,0,I,1 wagera)
+function generateTrackingCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = 'CHR-';
+  for (let i = 0; i < 6; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+}
+
 // Naya order create karna - PUBLIC
 router.post('/', async (req, res) => {
   const client = await pool.connect();
@@ -19,12 +29,34 @@ router.post('/', async (req, res) => {
     const finalDiscount = discount_amount || 0;
     const finalTotal = Math.max(0, total - finalDiscount);
 
-    const orderResult = await client.query(
-      `INSERT INTO orders (customer_id, customer_name, phone, address, payment_method, source, total_amount, coupon_code, discount_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [customer_id || null, customer_name, phone, address, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount]
-    );
-    const newOrder = orderResult.rows[0];
+    // Unique tracking code generate karna (agar clash ho to dobara try karega)
+    let trackingCode;
+    let inserted = false;
+    let newOrder;
+    let attempts = 0;
+
+    while (!inserted && attempts < 5) {
+      trackingCode = generateTrackingCode();
+      try {
+        const orderResult = await client.query(
+          `INSERT INTO orders (customer_id, customer_name, phone, address, payment_method, source, total_amount, coupon_code, discount_amount, status, tracking_code)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+          [customer_id || null, customer_name, phone, address, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount, 'Order Placed', trackingCode]
+        );
+        newOrder = orderResult.rows[0];
+        inserted = true;
+      } catch (err) {
+        if (err.code === '23505') {
+          attempts++;
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (!inserted) {
+      throw new Error('Could not generate a unique tracking code, please try again.');
+    }
 
     for (let item of items) {
       await client.query(
@@ -45,7 +77,6 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // Agar coupon use hua, uska usage record karna
     if (coupon_code) {
       const couponResult = await client.query('SELECT id FROM coupons WHERE code = $1', [coupon_code.toUpperCase()]);
       if (couponResult.rows.length > 0) {
@@ -79,7 +110,7 @@ router.get('/', verifyAdmin, async (req, res) => {
   }
 });
 
-// Ek order ki poori detail (factory info ke sath) - PROTECTED
+// Ek order ki poori detail (admin, id se) - PROTECTED
 router.get('/:id', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -105,23 +136,18 @@ router.get('/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-// Track order karna (phone + order id se) - PUBLIC
-router.get('/track/:id', async (req, res) => {
+// Customer ke liye: order tracking code se track karna - PUBLIC
+router.get('/track/:code', async (req, res) => {
   try {
-    const { id } = req.params;
-    const { phone } = req.query;
-
-    if (!phone) {
-      return res.status(400).json({ error: 'Phone number is required' });
-    }
+    const { code } = req.params;
 
     const orderResult = await pool.query(
-      'SELECT * FROM orders WHERE id = $1 AND phone = $2',
-      [id, phone]
+      'SELECT * FROM orders WHERE tracking_code = $1',
+      [code.toUpperCase().trim()]
     );
 
     if (orderResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Order not found. Please check your order number and phone.' });
+      return res.status(404).json({ error: 'No order found with this tracking code. Please check and try again.' });
     }
 
     const order = orderResult.rows[0];
@@ -131,11 +157,40 @@ router.get('/track/:id', async (req, res) => {
        FROM order_items oi
        LEFT JOIN products p ON oi.product_id = p.id
        WHERE oi.order_id = $1`,
-      [id]
+      [order.id]
     );
     order.items = itemsResult.rows;
 
     res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Customer khud delivery confirm kare (tracking code se) - PUBLIC
+router.patch('/track/:code/confirm-delivery', async (req, res) => {
+  try {
+    const { code } = req.params;
+
+    const orderResult = await pool.query('SELECT * FROM orders WHERE tracking_code = $1', [code.toUpperCase().trim()]);
+    if (orderResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const order = orderResult.rows[0];
+
+    if (order.status === 'Delivered') {
+      return res.status(400).json({ error: 'Order is already marked as delivered' });
+    }
+    if (order.status === 'Cancelled') {
+      return res.status(400).json({ error: 'This order was cancelled' });
+    }
+
+    const result = await pool.query(
+      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
+      ['Delivered', order.id]
+    );
+
+    res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -168,40 +223,6 @@ router.patch('/:id/confirm-call', verifyAdmin, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Order not found' });
     }
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Customer khud delivery confirm kare - PUBLIC
-router.patch('/:id/confirm-delivery', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { phone } = req.body;
-
-    const orderResult = await pool.query('SELECT * FROM orders WHERE id = $1', [id]);
-    if (orderResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Order not found' });
-    }
-    const order = orderResult.rows[0];
-
-    if (order.phone !== phone) {
-      return res.status(403).json({ error: 'Phone number does not match this order' });
-    }
-
-    if (order.status === 'Delivered') {
-      return res.status(400).json({ error: 'Order is already marked as delivered' });
-    }
-    if (order.status === 'Cancelled') {
-      return res.status(400).json({ error: 'This order was cancelled' });
-    }
-
-    const result = await pool.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
-      ['Delivered', id]
-    );
-
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -255,16 +276,16 @@ router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
   }
 });
 
-// Courier/tracking details add karna - PROTECTED
+// Courier/tracking details add karna aur estimated delivery date - PROTECTED
 router.patch('/:id/courier', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { courier_name, tracking_number } = req.body;
+    const { courier_name, tracking_number, estimated_delivery } = req.body;
 
     const result = await pool.query(
-      `UPDATE orders SET courier_name = $1, tracking_number = $2, status = 'Shipped'
-       WHERE id = $3 RETURNING *`,
-      [courier_name, tracking_number, id]
+      `UPDATE orders SET courier_name = $1, tracking_number = $2, status = 'Shipped', estimated_delivery = $3
+       WHERE id = $4 RETURNING *`,
+      [courier_name, tracking_number, estimated_delivery || null, id]
     );
 
     if (result.rows.length === 0) {
