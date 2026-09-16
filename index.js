@@ -11,6 +11,7 @@ const reviewsRoute = require('./routes/reviews');
 const settingsRoute = require('./routes/settings');
 const couponsRoute = require('./routes/coupons');
 const wishlistRoute = require('./routes/wishlist');
+const couriersRoute = require('./routes/couriers');
 
 const app = express();
 app.use(cors());
@@ -25,6 +26,7 @@ app.use('/api/reviews', reviewsRoute);
 app.use('/api/settings', settingsRoute);
 app.use('/api/coupons', couponsRoute);
 app.use('/api/wishlist', wishlistRoute);
+app.use('/api/couriers', couriersRoute);
 
 app.get('/', async (req, res) => {
   try {
