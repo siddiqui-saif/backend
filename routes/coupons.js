@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
+const { couponLimiter } = require('../middleware/rateLimiter');
 
 // Admin: sab coupons dikhana - PROTECTED
 router.get('/admin/all', verifyAdmin, async (req, res) => {
@@ -82,7 +83,7 @@ router.delete('/:id', verifyAdmin, async (req, res) => {
 });
 
 // Customer: coupon validate karna (checkout ke waqt) - PUBLIC
-router.post('/validate', async (req, res) => {
+router.post('/validate', couponLimiter, async (req, res) => {
   try {
     const { code, order_total, phone } = req.body;
 
