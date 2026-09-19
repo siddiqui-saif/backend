@@ -3,8 +3,8 @@ const router = express.Router();
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
 const { couponLimiter } = require('../middleware/rateLimiter');
+const { normalizePhone } = require('../utils/phoneHelper');
 
-// Admin: sab coupons dikhana - PROTECTED
 router.get('/admin/all', verifyAdmin, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM coupons ORDER BY created_at DESC');
@@ -14,7 +14,6 @@ router.get('/admin/all', verifyAdmin, async (req, res) => {
   }
 });
 
-// Admin: naya coupon banana - PROTECTED
 router.post('/', verifyAdmin, async (req, res) => {
   try {
     const {
@@ -53,7 +52,6 @@ router.post('/', verifyAdmin, async (req, res) => {
   }
 });
 
-// Admin: coupon activate/deactivate - PROTECTED
 router.patch('/:id/toggle', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -71,7 +69,6 @@ router.patch('/:id/toggle', verifyAdmin, async (req, res) => {
   }
 });
 
-// Admin: coupon delete karna - PROTECTED
 router.delete('/:id', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -82,10 +79,10 @@ router.delete('/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-// Customer: coupon validate karna (checkout ke waqt) - PUBLIC
 router.post('/validate', couponLimiter, async (req, res) => {
   try {
     const { code, order_total, phone } = req.body;
+    const normalizedPhone = normalizePhone(phone);
 
     if (!code) {
       return res.status(400).json({ error: 'Please enter a coupon code' });
@@ -120,11 +117,10 @@ router.post('/validate', couponLimiter, async (req, res) => {
       return res.status(400).json({ error: 'This coupon has reached its usage limit' });
     }
 
-    // Per-customer limit check (phone number se, chahe guest ho ya login)
-    if (phone) {
+    if (normalizedPhone) {
       const usageCheck = await pool.query(
         'SELECT COUNT(*) FROM coupon_usage WHERE coupon_id = $1 AND phone = $2',
-        [coupon.id, phone]
+        [coupon.id, normalizedPhone]
       );
       const timesUsed = parseInt(usageCheck.rows[0].count);
       if (timesUsed >= coupon.per_customer_limit) {
@@ -132,7 +128,6 @@ router.post('/validate', couponLimiter, async (req, res) => {
       }
     }
 
-    // Discount calculate karna
     let discountAmount = 0;
     if (coupon.discount_type === 'percentage') {
       discountAmount = (order_total * parseFloat(coupon.discount_value)) / 100;
