@@ -12,20 +12,109 @@ function generateTrackingCode() {
   return code;
 }
 
+// Coupon discount server-side calculate karna (client ke data pe bharosa nahi karte)
+async function calculateCouponDiscount(client, code, orderTotal, phone) {
+  const couponResult = await client.query(
+    'SELECT * FROM coupons WHERE code = $1',
+    [code.toUpperCase().trim()]
+  );
+
+  if (couponResult.rows.length === 0) {
+    throw new Error('Invalid coupon code');
+  }
+
+  const coupon = couponResult.rows[0];
+
+  if (!coupon.is_active) {
+    throw new Error('This coupon is no longer active');
+  }
+  if (coupon.expiry_date && new Date(coupon.expiry_date) < new Date()) {
+    throw new Error('This coupon has expired');
+  }
+  if (orderTotal < parseFloat(coupon.min_order_amount)) {
+    throw new Error(`This coupon requires a minimum order of Rs ${parseFloat(coupon.min_order_amount).toLocaleString()}`);
+  }
+  if (coupon.usage_limit !== null && coupon.usage_count >= coupon.usage_limit) {
+    throw new Error('This coupon has reached its usage limit');
+  }
+
+  if (phone) {
+    const usageCheck = await client.query(
+      'SELECT COUNT(*) FROM coupon_usage WHERE coupon_id = $1 AND phone = $2',
+      [coupon.id, phone]
+    );
+    if (parseInt(usageCheck.rows[0].count) >= coupon.per_customer_limit) {
+      throw new Error('You have already used this coupon the maximum number of times');
+    }
+  }
+
+  let discountAmount = 0;
+  if (coupon.discount_type === 'percentage') {
+    discountAmount = (orderTotal * parseFloat(coupon.discount_value)) / 100;
+  } else {
+    discountAmount = parseFloat(coupon.discount_value);
+  }
+  discountAmount = Math.min(discountAmount, orderTotal);
+
+  return { couponId: coupon.id, discountAmount: Math.round(discountAmount * 100) / 100 };
+}
+
 // Naya order create karna - PUBLIC
 router.post('/', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { customer_name, phone, address, landmark, payment_method, source, items, customer_id, coupon_code, discount_amount } = req.body;
+    const { customer_name, phone, address, landmark, payment_method, source, items, customer_id, coupon_code } = req.body;
+
+    if (!items || items.length === 0) {
+      return res.status(400).json({ error: 'Order must contain at least one item' });
+    }
 
     await client.query('BEGIN');
 
+    // Har item ki ASAL price database se nikalna (client ka bheja price kabhi use nahi karte)
+    const verifiedItems = [];
     let total = 0;
+
     for (let item of items) {
-      total += item.price * item.quantity;
+      const productResult = await client.query(
+        'SELECT id, name, price, is_active FROM products WHERE id = $1',
+        [item.product_id]
+      );
+
+      if (productResult.rows.length === 0) {
+        throw new Error(`Product not found (ID: ${item.product_id})`);
+      }
+
+      const product = productResult.rows[0];
+
+      if (!product.is_active) {
+        throw new Error(`"${product.name}" is no longer available`);
+      }
+
+      const verifiedPrice = parseFloat(product.price);
+      const quantity = parseInt(item.quantity) || 1;
+
+      verifiedItems.push({
+        product_id: item.product_id,
+        product_name: product.name,
+        size: item.size,
+        color: item.color,
+        quantity,
+        price: verifiedPrice, // Database wali price use ho rahi hai, client wali nahi
+      });
+
+      total += verifiedPrice * quantity;
     }
 
-    const finalDiscount = discount_amount || 0;
+    // Coupon ka discount bhi server pe dobara calculate karna
+    let finalDiscount = 0;
+    let couponId = null;
+    if (coupon_code) {
+      const couponResult = await calculateCouponDiscount(client, coupon_code, total, phone);
+      finalDiscount = couponResult.discountAmount;
+      couponId = couponResult.couponId;
+    }
+
     const finalTotal = Math.max(0, total - finalDiscount);
 
     let trackingCode;
@@ -56,7 +145,7 @@ router.post('/', async (req, res) => {
       throw new Error('Could not generate a unique tracking code, please try again.');
     }
 
-    for (let item of items) {
+    for (let item of verifiedItems) {
       await client.query(
         `INSERT INTO order_items (order_id, product_id, size, color, quantity, price)
          VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -71,20 +160,16 @@ router.post('/', async (req, res) => {
       );
 
       if (stockCheck.rows.length === 0 || stockCheck.rows[0].stock_qty < 0) {
-        throw new Error(`Out of stock: Product ${item.product_id}, Size ${item.size}`);
+        throw new Error(`"${item.product_name}" (Size ${item.size}) is out of stock`);
       }
     }
 
-    if (coupon_code) {
-      const couponResult = await client.query('SELECT id FROM coupons WHERE code = $1', [coupon_code.toUpperCase()]);
-      if (couponResult.rows.length > 0) {
-        const couponId = couponResult.rows[0].id;
-        await client.query(
-          'INSERT INTO coupon_usage (coupon_id, customer_id, phone, order_id) VALUES ($1, $2, $3, $4)',
-          [couponId, customer_id || null, phone, newOrder.id]
-        );
-        await client.query('UPDATE coupons SET usage_count = usage_count + 1 WHERE id = $1', [couponId]);
-      }
+    if (couponId) {
+      await client.query(
+        'INSERT INTO coupon_usage (coupon_id, customer_id, phone, order_id) VALUES ($1, $2, $3, $4)',
+        [couponId, customer_id || null, phone, newOrder.id]
+      );
+      await client.query('UPDATE coupons SET usage_count = usage_count + 1 WHERE id = $1', [couponId]);
     }
 
     await client.query('COMMIT');
@@ -253,7 +338,7 @@ router.patch('/:id/confirm-call', verifyAdmin, async (req, res) => {
   }
 });
 
-// Order cancel karna - PROTECTED
+// Order cancel karna (coupon usage bhi wapas revert hoga) - PROTECTED
 router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -282,6 +367,21 @@ router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
          WHERE product_id = $2 AND size = $3 AND color IS NOT DISTINCT FROM $4`,
         [item.quantity, item.product_id, item.size, item.color]
       );
+    }
+
+    // Agar coupon use hua tha, uska usage_count wapas kam karna
+    if (order.coupon_code) {
+      const couponResult = await client.query('SELECT id FROM coupons WHERE code = $1', [order.coupon_code]);
+      if (couponResult.rows.length > 0) {
+        await client.query(
+          'UPDATE coupons SET usage_count = GREATEST(usage_count - 1, 0) WHERE id = $1',
+          [couponResult.rows[0].id]
+        );
+        await client.query(
+          'DELETE FROM coupon_usage WHERE coupon_id = $1 AND order_id = $2',
+          [couponResult.rows[0].id, id]
+        );
+      }
     }
 
     const result = await client.query(
