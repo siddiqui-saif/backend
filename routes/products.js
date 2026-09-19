@@ -201,7 +201,7 @@ router.patch('/:id/deactivate', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      'UPDATE products SET is_active = false WHERE id = $1 RETURNING *',
+      'UPDATE products SET is_active = false, deactivated_by_factory = false WHERE id = $1 RETURNING *',
       [id]
     );
     if (result.rows.length === 0) {
@@ -212,7 +212,6 @@ router.patch('/:id/deactivate', verifyAdmin, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 // Ek product wapas activate karna - PROTECTED
 router.patch('/:id/activate', verifyAdmin, async (req, res) => {
   try {
