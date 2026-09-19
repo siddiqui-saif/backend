@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
 
-// Sab categories dikhana - PUBLIC (customer side filter ke liye bhi kaam aayega)
+// Sab categories dikhana - PUBLIC
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM categories ORDER BY name');
@@ -30,6 +30,35 @@ router.post('/', verifyAdmin, async (req, res) => {
     if (err.code === '23505') {
       return res.status(400).json({ error: 'This category already exists' });
     }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Category delete karna - PROTECTED (agar koi product use kar raha ho to block)
+router.delete('/:id', verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const categoryResult = await pool.query('SELECT * FROM categories WHERE id = $1', [id]);
+    if (categoryResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+    const category = categoryResult.rows[0];
+
+    const usageCheck = await pool.query(
+      'SELECT COUNT(*) FROM products WHERE category = $1',
+      [category.name]
+    );
+
+    if (parseInt(usageCheck.rows[0].count) > 0) {
+      return res.status(400).json({
+        error: `Cannot delete "${category.name}" — it is used by ${usageCheck.rows[0].count} product(s). Change their category first.`,
+      });
+    }
+
+    await pool.query('DELETE FROM categories WHERE id = $1', [id]);
+    res.json({ message: 'Category deleted' });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
