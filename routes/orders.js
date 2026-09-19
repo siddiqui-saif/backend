@@ -108,6 +108,32 @@ router.get('/', verifyAdmin, async (req, res) => {
   }
 });
 
+// Dashboard analytics: product/factory-wise revenue - PROTECTED
+router.get('/analytics/summary', verifyAdmin, async (req, res) => {
+  try {
+    const { from, to } = req.query;
+
+    const result = await pool.query(
+      `SELECT p.id as product_id, p.name as product_name, p.category,
+              f.name as factory_name, f.city as factory_city,
+              SUM(oi.quantity) as total_quantity,
+              SUM(oi.quantity * oi.price) as total_revenue
+       FROM order_items oi
+       JOIN orders o ON oi.order_id = o.id
+       JOIN products p ON oi.product_id = p.id
+       LEFT JOIN factories f ON p.factory_id = f.id
+       WHERE o.status != 'Cancelled' AND o.created_at BETWEEN $1 AND $2
+       GROUP BY p.id, p.name, p.category, f.name, f.city
+       ORDER BY total_revenue DESC`,
+      [from, to]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Ek order ki poori detail (admin, id se) - PROTECTED
 router.get('/:id', verifyAdmin, async (req, res) => {
   try {
