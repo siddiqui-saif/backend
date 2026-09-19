@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
+const { normalizePhone } = require('../utils/phoneHelper');
 
 function generateTrackingCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -12,7 +13,6 @@ function generateTrackingCode() {
   return code;
 }
 
-// Coupon discount server-side calculate karna (client ke data pe bharosa nahi karte)
 async function calculateCouponDiscount(client, code, orderTotal, phone) {
   const couponResult = await client.query(
     'SELECT * FROM coupons WHERE code = $1',
@@ -64,6 +64,7 @@ router.post('/', async (req, res) => {
   const client = await pool.connect();
   try {
     const { customer_name, phone, address, landmark, payment_method, source, items, customer_id, coupon_code } = req.body;
+    const normalizedPhone = normalizePhone(phone);
 
     if (!items || items.length === 0) {
       return res.status(400).json({ error: 'Order must contain at least one item' });
@@ -71,7 +72,6 @@ router.post('/', async (req, res) => {
 
     await client.query('BEGIN');
 
-    // Har item ki ASAL price database se nikalna (client ka bheja price kabhi use nahi karte)
     const verifiedItems = [];
     let total = 0;
 
@@ -100,17 +100,16 @@ router.post('/', async (req, res) => {
         size: item.size,
         color: item.color,
         quantity,
-        price: verifiedPrice, // Database wali price use ho rahi hai, client wali nahi
+        price: verifiedPrice,
       });
 
       total += verifiedPrice * quantity;
     }
 
-    // Coupon ka discount bhi server pe dobara calculate karna
     let finalDiscount = 0;
     let couponId = null;
     if (coupon_code) {
-      const couponResult = await calculateCouponDiscount(client, coupon_code, total, phone);
+      const couponResult = await calculateCouponDiscount(client, coupon_code, total, normalizedPhone);
       finalDiscount = couponResult.discountAmount;
       couponId = couponResult.couponId;
     }
@@ -128,7 +127,7 @@ router.post('/', async (req, res) => {
         const orderResult = await client.query(
           `INSERT INTO orders (customer_id, customer_name, phone, address, landmark, payment_method, source, total_amount, coupon_code, discount_amount, status, tracking_code)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-          [customer_id || null, customer_name, phone, address, landmark || null, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount, 'Order Placed', trackingCode]
+          [customer_id || null, customer_name, normalizedPhone, address, landmark || null, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount, 'Order Placed', trackingCode]
         );
         newOrder = orderResult.rows[0];
         inserted = true;
@@ -167,7 +166,7 @@ router.post('/', async (req, res) => {
     if (couponId) {
       await client.query(
         'INSERT INTO coupon_usage (coupon_id, customer_id, phone, order_id) VALUES ($1, $2, $3, $4)',
-        [couponId, customer_id || null, phone, newOrder.id]
+        [couponId, customer_id || null, normalizedPhone, newOrder.id]
       );
       await client.query('UPDATE coupons SET usage_count = usage_count + 1 WHERE id = $1', [couponId]);
     }
@@ -338,7 +337,7 @@ router.patch('/:id/confirm-call', verifyAdmin, async (req, res) => {
   }
 });
 
-// Order cancel karna (coupon usage bhi wapas revert hoga) - PROTECTED
+// Order cancel karna - PROTECTED
 router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
@@ -369,7 +368,6 @@ router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
       );
     }
 
-    // Agar coupon use hua tha, uska usage_count wapas kam karna
     if (order.coupon_code) {
       const couponResult = await client.query('SELECT id FROM coupons WHERE code = $1', [order.coupon_code]);
       if (couponResult.rows.length > 0) {
