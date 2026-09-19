@@ -4,9 +4,10 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
+const { loginLimiter } = require('../middleware/rateLimiter');
 
-// Admin login
-router.post('/login', async (req, res) => {
+// Admin login - rate limited
+router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { username, password } = req.body;
 
