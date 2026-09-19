@@ -12,6 +12,7 @@ const settingsRoute = require('./routes/settings');
 const couponsRoute = require('./routes/coupons');
 const wishlistRoute = require('./routes/wishlist');
 const couriersRoute = require('./routes/couriers');
+const categoriesRoute = require('./routes/categories');
 
 const app = express();
 app.use(cors());
@@ -27,6 +28,7 @@ app.use('/api/settings', settingsRoute);
 app.use('/api/coupons', couponsRoute);
 app.use('/api/wishlist', wishlistRoute);
 app.use('/api/couriers', couriersRoute);
+app.use('/api/categories', categoriesRoute);
 
 app.get('/', async (req, res) => {
   try {
