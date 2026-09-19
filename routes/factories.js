@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
 
-// Sab factories ki list (sirf active wali) - PUBLIC, koi login zaroori nahi
+// Sab factories ki list (sirf active wali) - PUBLIC
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM factories WHERE is_active = true ORDER BY id');
@@ -37,16 +37,24 @@ router.post('/', verifyAdmin, async (req, res) => {
   }
 });
 
-// Factory deactivate karna - PROTECTED
+// Factory deactivate karna - sirf currently-active products ko "factory ne band kiya" mark karke band karte hain
 router.patch('/:id/deactivate', verifyAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
     await client.query('BEGIN');
+
     await client.query('UPDATE factories SET is_active = false WHERE id = $1', [id]);
-    await client.query('UPDATE products SET is_active = false WHERE factory_id = $1', [id]);
+
+    // Sirf wo products jo abhi active hain, unhe "factory ne band kiya" flag ke sath band karte hain
+    await client.query(
+      `UPDATE products SET is_active = false, deactivated_by_factory = true
+       WHERE factory_id = $1 AND is_active = true`,
+      [id]
+    );
+
     await client.query('COMMIT');
-    res.json({ message: 'Factory aur uske products deactivate ho gaye' });
+    res.json({ message: 'Factory and its products deactivated' });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });
@@ -55,16 +63,25 @@ router.patch('/:id/deactivate', verifyAdmin, async (req, res) => {
   }
 });
 
-// Factory wapas activate karna - PROTECTED
+// Factory wapas activate karna - sirf wahi products wapas active karte hain jo factory ki wajah se band hue the
 router.patch('/:id/activate', verifyAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
     await client.query('BEGIN');
+
     await client.query('UPDATE factories SET is_active = true WHERE id = $1', [id]);
-    await client.query('UPDATE products SET is_active = true WHERE factory_id = $1', [id]);
+
+    // Sirf wo products jo "factory ki wajah se" band hue the, unhe wapas active karte hain
+    // Jo admin ne khud manually band kiye the (deactivated_by_factory = false), unhe chhorte hain
+    await client.query(
+      `UPDATE products SET is_active = true, deactivated_by_factory = false
+       WHERE factory_id = $1 AND deactivated_by_factory = true`,
+      [id]
+    );
+
     await client.query('COMMIT');
-    res.json({ message: 'Factory aur uske products wapas activate ho gaye' });
+    res.json({ message: 'Factory and its previously-active products reactivated' });
   } catch (err) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });
