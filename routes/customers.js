@@ -1,3 +1,4 @@
+const { loginLimiter } = require('../middleware/rateLimiter');
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
@@ -44,7 +45,7 @@ router.post('/register', async (req, res) => {
 });
 
 // Customer login karna
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { phone, password } = req.body;
 
