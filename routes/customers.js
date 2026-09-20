@@ -62,12 +62,6 @@ router.post('/register', async (req, res) => {
 
     const customer = result.rows[0];
 
-    // Isi phone se pehle jo guest orders hue the, unhe naye account se link karna
-    await pool.query(
-      'UPDATE orders SET customer_id = $1 WHERE phone = $2 AND customer_id IS NULL',
-      [customer.id, normalizedPhone]
-    );
-
     setCustomerCookie(res, customer);
     res.json({
       message: 'Account created',
@@ -164,7 +158,7 @@ router.put('/me', verifyCustomer, async (req, res) => {
   }
 });
 
-// Apna password khud change karna - PROTECTED (baaki devices se logout kar deta hai)
+// Apna password khud change karna - PROTECTED
 router.patch('/me/change-password', verifyCustomer, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
