@@ -1,4 +1,3 @@
-const { loginLimiter } = require('../middleware/rateLimiter');
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
@@ -6,15 +5,47 @@ const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const verifyCustomer = require('../middleware/customerAuth');
 const verifyAdmin = require('../middleware/auth');
+const { loginLimiter } = require('../middleware/rateLimiter');
+const { normalizePhone } = require('../utils/phoneHelper');
+
+const LOCKOUT_THRESHOLD = 5;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+
+function isValidPassword(password) {
+  return password && password.length >= 8 && /\d/.test(password);
+}
+
+function setCustomerCookie(res, customer) {
+  const token = jwt.sign(
+    { id: customer.id, name: customer.name, version: customer.token_version || 0 },
+    process.env.JWT_SECRET,
+    { expiresIn: '30d' }
+  );
+  res.cookie('customer_token', token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    path: '/',
+  });
+}
 
 // Customer register karna
 router.post('/register', async (req, res) => {
   try {
     const { name, phone, email, password } = req.body;
+    const normalizedPhone = normalizePhone(phone);
+
+    if (!name || !phone || !password) {
+      return res.status(400).json({ error: 'Name, phone, and password are required' });
+    }
+    if (!isValidPassword(password)) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters and include a number' });
+    }
 
     const existing = await pool.query(
-      'SELECT * FROM customers WHERE phone = $1 OR email = $2',
-      [phone, email]
+      'SELECT * FROM customers WHERE phone = $1 OR (email = $2 AND email IS NOT NULL)',
+      [normalizedPhone, email || null]
     );
 
     if (existing.rows.length > 0) {
@@ -25,33 +56,43 @@ router.post('/register', async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO customers (name, phone, email, password_hash, is_guest)
-       VALUES ($1, $2, $3, $4, false) RETURNING id, name, phone, email`,
-      [name, phone, email, hashedPassword]
+       VALUES ($1, $2, $3, $4, false) RETURNING id, name, phone, email, token_version`,
+      [name, normalizedPhone, email || null, hashedPassword]
     );
 
     const customer = result.rows[0];
 
-    const token = jwt.sign(
-      { id: customer.id, name: customer.name },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
+    // Isi phone se pehle jo guest orders hue the, unhe naye account se link karna
+    await pool.query(
+      'UPDATE orders SET customer_id = $1 WHERE phone = $2 AND customer_id IS NULL',
+      [customer.id, normalizedPhone]
     );
 
-    res.json({ message: 'Account created', customer, token });
+    setCustomerCookie(res, customer);
+    res.json({
+      message: 'Account created',
+      customer: { id: customer.id, name: customer.name, phone: customer.phone, email: customer.email },
+    });
 
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Customer login karna
+// Customer login karna - phone ya email dono se
 router.post('/login', loginLimiter, async (req, res) => {
   try {
-    const { phone, password } = req.body;
+    const { identifier, password } = req.body;
+
+    if (!identifier || !password) {
+      return res.status(400).json({ error: 'Please enter your phone/email and password' });
+    }
+
+    const normalizedIdentifier = normalizePhone(identifier);
 
     const result = await pool.query(
-      'SELECT * FROM customers WHERE phone = $1 AND is_guest = false',
-      [phone]
+      'SELECT * FROM customers WHERE (phone = $1 OR phone = $2 OR email = $2) AND is_guest = false',
+      [normalizedIdentifier, identifier]
     );
 
     if (result.rows.length === 0) {
@@ -59,26 +100,41 @@ router.post('/login', loginLimiter, async (req, res) => {
     }
 
     const customer = result.rows[0];
+
+    if (customer.locked_until && new Date(customer.locked_until) > new Date()) {
+      const minutesLeft = Math.ceil((new Date(customer.locked_until) - new Date()) / 60000);
+      return res.status(403).json({ error: `Account temporarily locked. Try again in ${minutesLeft} minute(s).` });
+    }
+
     const passwordMatch = await bcrypt.compare(password, customer.password_hash);
 
     if (!passwordMatch) {
+      const attempts = (customer.failed_login_attempts || 0) + 1;
+      if (attempts >= LOCKOUT_THRESHOLD) {
+        await pool.query(
+          'UPDATE customers SET failed_login_attempts = 0, locked_until = $1 WHERE id = $2',
+          [new Date(Date.now() + LOCKOUT_DURATION_MS), customer.id]
+        );
+        return res.status(403).json({ error: 'Too many failed attempts. Account locked for 15 minutes.' });
+      }
+      await pool.query('UPDATE customers SET failed_login_attempts = $1 WHERE id = $2', [attempts, customer.id]);
       return res.status(401).json({ error: 'Incorrect password' });
     }
 
-    const token = jwt.sign(
-      { id: customer.id, name: customer.name },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    await pool.query('UPDATE customers SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1', [customer.id]);
 
-    res.json({ message: 'Login successful', customer: { id: customer.id, name: customer.name, phone: customer.phone, email: customer.email }, token });
+    setCustomerCookie(res, customer);
+    res.json({
+      message: 'Login successful',
+      customer: { id: customer.id, name: customer.name, phone: customer.phone, email: customer.email },
+    });
 
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Apna profile dekhna - PROTECTED
+// Current session check - PROTECTED
 router.get('/me', verifyCustomer, async (req, res) => {
   try {
     const result = await pool.query(
@@ -108,7 +164,7 @@ router.put('/me', verifyCustomer, async (req, res) => {
   }
 });
 
-// Apna password khud change karna - PROTECTED
+// Apna password khud change karna - PROTECTED (baaki devices se logout kar deta hai)
 router.patch('/me/change-password', verifyCustomer, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
@@ -116,8 +172,8 @@ router.patch('/me/change-password', verifyCustomer, async (req, res) => {
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Please provide current and new password' });
     }
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    if (!isValidPassword(newPassword)) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters and include a number' });
     }
 
     const result = await pool.query('SELECT * FROM customers WHERE id = $1', [req.customer.id]);
@@ -133,9 +189,30 @@ router.patch('/me/change-password', verifyCustomer, async (req, res) => {
     }
 
     const newHash = await bcrypt.hash(newPassword, 10);
-    await pool.query('UPDATE customers SET password_hash = $1 WHERE id = $2', [newHash, req.customer.id]);
+    const updated = await pool.query(
+      'UPDATE customers SET password_hash = $1, token_version = token_version + 1 WHERE id = $2 RETURNING *',
+      [newHash, req.customer.id]
+    );
 
-    res.json({ message: 'Password changed successfully' });
+    setCustomerCookie(res, updated.rows[0]);
+    res.json({ message: 'Password changed successfully. You have been logged out of other devices.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Is device se logout - PROTECTED
+router.post('/logout', verifyCustomer, (req, res) => {
+  res.clearCookie('customer_token', { httpOnly: true, secure: true, sameSite: 'none', path: '/' });
+  res.json({ message: 'Logged out' });
+});
+
+// SAB devices se logout - PROTECTED
+router.post('/logout-all', verifyCustomer, async (req, res) => {
+  try {
+    await pool.query('UPDATE customers SET token_version = token_version + 1 WHERE id = $1', [req.customer.id]);
+    res.clearCookie('customer_token', { httpOnly: true, secure: true, sameSite: 'none', path: '/' });
+    res.json({ message: 'Logged out from all devices' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -185,13 +262,13 @@ router.patch('/admin/:id/reset-password', verifyAdmin, async (req, res) => {
     const { id } = req.params;
     const { newPassword } = req.body;
 
-    if (!newPassword || newPassword.length < 6) {
-      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    if (!isValidPassword(newPassword)) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters and include a number' });
     }
 
     const newHash = await bcrypt.hash(newPassword, 10);
     const result = await pool.query(
-      'UPDATE customers SET password_hash = $1 WHERE id = $2 RETURNING id, name',
+      'UPDATE customers SET password_hash = $1, token_version = token_version + 1 WHERE id = $2 RETURNING id, name',
       [newHash, id]
     );
 
