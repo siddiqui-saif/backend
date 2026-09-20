@@ -3,10 +3,26 @@ const router = express.Router();
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
 
-// Sab categories dikhana - PUBLIC
+// Sab categories dikhana - PUBLIC (department ke sath, filter bhi kar sakte hain)
 router.get('/', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM categories ORDER BY name');
+    const { department_id } = req.query;
+
+    let query = `
+      SELECT c.*, d.name as department_name
+      FROM categories c
+      LEFT JOIN departments d ON c.department_id = d.id
+    `;
+    const params = [];
+
+    if (department_id) {
+      params.push(department_id);
+      query += ` WHERE c.department_id = $${params.length}`;
+    }
+
+    query += ' ORDER BY c.name';
+
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -16,14 +32,17 @@ router.get('/', async (req, res) => {
 // Nayi category add karna - PROTECTED
 router.post('/', verifyAdmin, async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, department_id } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Category name is required' });
     }
+    if (!department_id) {
+      return res.status(400).json({ error: 'Please select a department for this category' });
+    }
 
     const result = await pool.query(
-      'INSERT INTO categories (name) VALUES ($1) RETURNING *',
-      [name.trim()]
+      'INSERT INTO categories (name, department_id) VALUES ($1, $2) RETURNING *',
+      [name.trim(), department_id]
     );
     res.json(result.rows[0]);
   } catch (err) {
