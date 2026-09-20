@@ -1,26 +1,26 @@
 const jwt = require('jsonwebtoken');
+const pool = require('../config/db');
 
-function verifyAdmin(req, res, next) {
-  // Token header se nikalna
-  const authHeader = req.headers['authorization'];
-
-  if (!authHeader) {
-    return res.status(401).json({ error: 'Login zaroori hai (token nahi mila)' });
-  }
-
-  // Header aisi hoti hai: "Bearer <token>" - hume sirf token chahiye
-  const token = authHeader.split(' ')[1];
+async function verifyAdmin(req, res, next) {
+  const token = req.cookies?.admin_token;
 
   if (!token) {
-    return res.status(401).json({ error: 'Token format galat hai' });
+    return res.status(401).json({ error: 'Login required' });
   }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.admin = decoded; // Admin ki details request ke sath aage bhej dena
-    next(); // Sab theek hai, aage jane dein
+
+    // Check karna: kya ye token abhi bhi "valid" hai (logout-all na hua ho, ya password change na hua ho)
+    const result = await pool.query('SELECT token_version FROM admins WHERE id = $1', [decoded.id]);
+    if (result.rows.length === 0 || result.rows[0].token_version !== decoded.version) {
+      return res.status(401).json({ error: 'Session expired. Please log in again.' });
+    }
+
+    req.admin = decoded;
+    next();
   } catch (err) {
-    return res.status(403).json({ error: 'Token invalid ya expire ho chuka hai' });
+    return res.status(403).json({ error: 'Token is invalid or expired' });
   }
 }
 
