@@ -17,7 +17,6 @@ const categoriesRoute = require('./routes/categories');
 
 const app = express();
 
-// Sirf inhi domains ko cookies bhejne/lene ki ijazat hai
 const allowedOrigins = [
   'https://cherries-store.vercel.app',
   'http://localhost:5173',
