@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const pool = require('./config/db');
 const factoriesRoute = require('./routes/factories');
 const productsRoute = require('./routes/products');
@@ -15,7 +16,25 @@ const couriersRoute = require('./routes/couriers');
 const categoriesRoute = require('./routes/categories');
 
 const app = express();
-app.use(cors());
+
+// Sirf inhi domains ko cookies bhejne/lene ki ijazat hai
+const allowedOrigins = [
+  'https://cherries-store.vercel.app',
+  'http://localhost:5173',
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));
+
+app.use(cookieParser());
 app.use(express.json());
 
 app.use('/api/factories', factoriesRoute);
