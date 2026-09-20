@@ -1,4 +1,3 @@
-const { handleError } = require('../middleware/errorHandler');
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/db');
@@ -64,7 +63,7 @@ async function calculateCouponDiscount(client, code, orderTotal, phone) {
 router.post('/', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { customer_name, phone, address, landmark, payment_method, source, items, customer_id, coupon_code } = req.body;
+    const { customer_name, phone, address, landmark, customer_note, payment_method, source, items, customer_id, coupon_code } = req.body;
     const normalizedPhone = normalizePhone(phone);
 
     if (!items || items.length === 0) {
@@ -126,9 +125,9 @@ router.post('/', async (req, res) => {
       trackingCode = generateTrackingCode();
       try {
         const orderResult = await client.query(
-          `INSERT INTO orders (customer_id, customer_name, phone, address, landmark, payment_method, source, total_amount, coupon_code, discount_amount, status, tracking_code)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-          [customer_id || null, customer_name, normalizedPhone, address, landmark || null, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount, 'Order Placed', trackingCode]
+          `INSERT INTO orders (customer_id, customer_name, phone, address, landmark, customer_note, payment_method, source, total_amount, coupon_code, discount_amount, status, tracking_code)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+          [customer_id || null, customer_name, normalizedPhone, address, landmark || null, customer_note || null, payment_method || 'COD', source || 'Website', finalTotal, coupon_code || null, finalDiscount, 'Order Placed', trackingCode]
         );
         newOrder = orderResult.rows[0];
         inserted = true;
@@ -193,7 +192,7 @@ router.get('/', verifyAdmin, async (req, res) => {
   }
 });
 
-// Dashboard analytics: product/factory-wise revenue - PROTECTED
+// Dashboard analytics - PROTECTED
 router.get('/analytics/summary', verifyAdmin, async (req, res) => {
   try {
     const { from, to } = req.query;
@@ -219,7 +218,7 @@ router.get('/analytics/summary', verifyAdmin, async (req, res) => {
   }
 });
 
-// Ek order ki poori detail (admin, id se) - PROTECTED
+// Ek order ki poori detail - PROTECTED
 router.get('/:id', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -245,7 +244,7 @@ router.get('/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-// Customer ke liye: order tracking code se track karna - PUBLIC
+// Track order karna - PUBLIC
 router.get('/track/:code', async (req, res) => {
   try {
     const { code } = req.params;
@@ -276,7 +275,7 @@ router.get('/track/:code', async (req, res) => {
   }
 });
 
-// Customer khud delivery confirm kare (tracking code se) - PUBLIC
+// Customer khud delivery confirm kare - PUBLIC
 router.patch('/track/:code/confirm-delivery', async (req, res) => {
   try {
     const { code } = req.params;
