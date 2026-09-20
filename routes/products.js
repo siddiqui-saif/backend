@@ -4,20 +4,29 @@ const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
 const { cloudinary, upload } = require('../config/cloudinary');
 
-// Sab active products dikhana - PUBLIC (city/category/size filter ke sath)
+// Sab active products dikhana - PUBLIC (department/category/size filter ke sath)
 router.get('/', async (req, res) => {
   try {
-    const { category, size } = req.query;
+    const { category, size, department_id } = req.query;
 
-    let query = 'SELECT * FROM products WHERE is_active = true';
+    let query = `
+      SELECT p.*, d.name as department_name
+      FROM products p
+      LEFT JOIN departments d ON p.department_id = d.id
+      WHERE p.is_active = true
+    `;
     const params = [];
 
+    if (department_id) {
+      params.push(department_id);
+      query += ` AND p.department_id = $${params.length}`;
+    }
     if (category) {
       params.push(category);
-      query += ` AND category = $${params.length}`;
+      query += ` AND p.category = $${params.length}`;
     }
 
-    query += ' ORDER BY id';
+    query += ' ORDER BY p.id';
 
     const productsResult = await pool.query(query, params);
     let products = productsResult.rows;
@@ -48,13 +57,14 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Admin ke liye: sab products dikhana (active + inactive, factory ke naam ke sath) - PROTECTED
+// Admin ke liye: sab products dikhana - PROTECTED
 router.get('/admin/all', verifyAdmin, async (req, res) => {
   try {
     const productsResult = await pool.query(
-      `SELECT p.*, f.name as factory_name, f.city as factory_city
+      `SELECT p.*, f.name as factory_name, f.city as factory_city, d.name as department_name
        FROM products p
        LEFT JOIN factories f ON p.factory_id = f.id
+       LEFT JOIN departments d ON p.department_id = d.id
        ORDER BY p.id DESC`
     );
     const products = productsResult.rows;
@@ -83,7 +93,13 @@ router.get('/admin/all', verifyAdmin, async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const productResult = await pool.query('SELECT * FROM products WHERE id = $1', [id]);
+    const productResult = await pool.query(
+      `SELECT p.*, d.name as department_name
+       FROM products p
+       LEFT JOIN departments d ON p.department_id = d.id
+       WHERE p.id = $1`,
+      [id]
+    );
     if (productResult.rows.length === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
@@ -110,11 +126,15 @@ router.get('/:id', async (req, res) => {
 // Naya product add karna - PROTECTED
 router.post('/', verifyAdmin, async (req, res) => {
   try {
-    const { factory_id, name, category, price, description, sizes } = req.body;
+    const { factory_id, department_id, name, category, price, description, sizes } = req.body;
+
+    if (!department_id) {
+      return res.status(400).json({ error: 'Please select a department' });
+    }
 
     const productResult = await pool.query(
-      'INSERT INTO products (factory_id, name, category, price, description) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [factory_id, name, category, price, description]
+      'INSERT INTO products (factory_id, department_id, name, category, price, description) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [factory_id, department_id, name, category, price, description]
     );
     const newProduct = productResult.rows[0];
 
@@ -137,12 +157,12 @@ router.post('/', verifyAdmin, async (req, res) => {
 router.put('/:id', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, category, price, description } = req.body;
+    const { name, category, price, description, department_id } = req.body;
 
     const result = await pool.query(
-      `UPDATE products SET name = $1, category = $2, price = $3, description = $4
-       WHERE id = $5 RETURNING *`,
-      [name, category, price, description, id]
+      `UPDATE products SET name = $1, category = $2, price = $3, description = $4, department_id = COALESCE($5, department_id)
+       WHERE id = $6 RETURNING *`,
+      [name, category, price, description, department_id || null, id]
     );
 
     if (result.rows.length === 0) {
@@ -212,6 +232,7 @@ router.patch('/:id/deactivate', verifyAdmin, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // Ek product wapas activate karna - PROTECTED
 router.patch('/:id/activate', verifyAdmin, async (req, res) => {
   try {
@@ -229,7 +250,7 @@ router.patch('/:id/activate', verifyAdmin, async (req, res) => {
   }
 });
 
-// Photo upload karna (color ke sath) - PROTECTED
+// Photo upload karna - PROTECTED
 router.post('/:id/images', verifyAdmin, upload.single('image'), async (req, res) => {
   try {
     const { id } = req.params;
