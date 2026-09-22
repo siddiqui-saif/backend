@@ -314,33 +314,5 @@ router.delete('/admin/:id', verifyAdmin, async (req, res) => {
   }
 });
 
-// Admin: SAB customers ek sath delete karna (testing data cleanup ke liye) - PROTECTED
-router.delete('/admin/all/bulk', verifyAdmin, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    const { deleteOrders } = req.query;
-
-    await client.query('BEGIN');
-
-    if (deleteOrders === 'true') {
-      await client.query('DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE customer_id IS NOT NULL)');
-      await client.query('DELETE FROM orders WHERE customer_id IS NOT NULL');
-    } else {
-      await client.query('UPDATE orders SET customer_id = NULL WHERE customer_id IS NOT NULL');
-    }
-
-    await client.query('DELETE FROM wishlist');
-    await client.query('DELETE FROM coupon_usage WHERE customer_id IS NOT NULL');
-    await client.query('DELETE FROM customers WHERE is_guest = false');
-
-    await client.query('COMMIT');
-    res.json({ message: 'All customers deleted successfully' });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(400).json({ error: err.message });
-  } finally {
-    client.release();
-  }
-});
 
 module.exports = router;
