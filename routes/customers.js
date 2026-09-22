@@ -276,4 +276,71 @@ router.patch('/admin/:id/reset-password', verifyAdmin, async (req, res) => {
   }
 });
 
+// Admin: customer delete karna (account only, orders "guest" ban jayenge) - PROTECTED
+router.delete('/admin/:id', verifyAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { deleteOrders } = req.query; // 'true' ya 'false' string ki tarah aayega
+
+    await client.query('BEGIN');
+
+    const customerCheck = await client.query('SELECT * FROM customers WHERE id = $1', [id]);
+    if (customerCheck.rows.length === 0) {
+      throw new Error('Customer not found');
+    }
+
+    if (deleteOrders === 'true') {
+      // Poora delete: customer ke saath uske orders bhi
+      await client.query('DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE customer_id = $1)', [id]);
+      await client.query('DELETE FROM orders WHERE customer_id = $1', [id]);
+    } else {
+      // Sirf account delete, orders "guest" ban jayenge
+      await client.query('UPDATE orders SET customer_id = NULL WHERE customer_id = $1', [id]);
+    }
+
+    // Wishlist aur coupon usage records hamesha delete honge (ye account-specific hain)
+    await client.query('DELETE FROM wishlist WHERE customer_id = $1', [id]);
+    await client.query('DELETE FROM coupon_usage WHERE customer_id = $1', [id]);
+    await client.query('DELETE FROM customers WHERE id = $1', [id]);
+
+    await client.query('COMMIT');
+    res.json({ message: 'Customer deleted successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(400).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Admin: SAB customers ek sath delete karna (testing data cleanup ke liye) - PROTECTED
+router.delete('/admin/all/bulk', verifyAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { deleteOrders } = req.query;
+
+    await client.query('BEGIN');
+
+    if (deleteOrders === 'true') {
+      await client.query('DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE customer_id IS NOT NULL)');
+      await client.query('DELETE FROM orders WHERE customer_id IS NOT NULL');
+    } else {
+      await client.query('UPDATE orders SET customer_id = NULL WHERE customer_id IS NOT NULL');
+    }
+
+    await client.query('DELETE FROM wishlist');
+    await client.query('DELETE FROM coupon_usage WHERE customer_id IS NOT NULL');
+    await client.query('DELETE FROM customers WHERE is_guest = false');
+
+    await client.query('COMMIT');
+    res.json({ message: 'All customers deleted successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(400).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 module.exports = router;
