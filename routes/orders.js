@@ -294,7 +294,7 @@ router.patch('/track/:code/confirm-delivery', async (req, res) => {
     }
 
     const result = await pool.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
+      'UPDATE orders SET status = $1, delivered_at = NOW() WHERE id = $2 RETURNING *',
       ['Delivered', order.id]
     );
 
@@ -309,10 +309,19 @@ router.patch('/:id/status', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-    const result = await pool.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
-      [status, id]
-    );
+
+    let result;
+    if (status === 'Delivered') {
+      result = await pool.query(
+        'UPDATE orders SET status = $1, delivered_at = NOW() WHERE id = $2 RETURNING *',
+        [status, id]
+      );
+    } else {
+      result = await pool.query(
+        'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
+        [status, id]
+      );
+    }
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
