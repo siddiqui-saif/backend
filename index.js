@@ -16,6 +16,7 @@ const couriersRoute = require('./routes/couriers');
 const categoriesRoute = require('./routes/categories');
 const departmentsRoute = require('./routes/departments');
 const wholesaleRoute = require('./routes/wholesale');
+const exchangesRoute = require('./routes/exchanges');
 
 const app = express();
 
@@ -51,6 +52,7 @@ app.use('/api/couriers', couriersRoute);
 app.use('/api/categories', categoriesRoute);
 app.use('/api/departments', departmentsRoute);
 app.use('/api/wholesale', wholesaleRoute);
+app.use('/api/exchanges', exchangesRoute);
 
 app.get('/', async (req, res) => {
   try {
