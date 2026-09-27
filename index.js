@@ -17,6 +17,7 @@ const categoriesRoute = require('./routes/categories');
 const departmentsRoute = require('./routes/departments');
 const wholesaleRoute = require('./routes/wholesale');
 const exchangesRoute = require('./routes/exchanges');
+const chatRoute = require('./routes/chat');
 
 const app = express();
 
@@ -53,6 +54,7 @@ app.use('/api/categories', categoriesRoute);
 app.use('/api/departments', departmentsRoute);
 app.use('/api/wholesale', wholesaleRoute);
 app.use('/api/exchanges', exchangesRoute);
+app.use('/api/chat', chatRoute);
 
 app.get('/', async (req, res) => {
   try {
