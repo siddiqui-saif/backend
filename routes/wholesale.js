@@ -1,27 +1,37 @@
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const pool = require('../config/db');
 const verifyAdmin = require('../middleware/auth');
-const { loginLimiter } = require('../middleware/rateLimiter');
+const { validateWholesale } = require('../utils/validators');
+
+const STATUSES = ['New', 'Contacted', 'Closed'];
+
+// Apna alag limiter, taake login ke limiter ke sath counter share na ho
+const submitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many inquiries from this connection. Please try again later, or contact us on WhatsApp.' },
+});
 
 // Naya inquiry submit karna - PUBLIC
-router.post('/', loginLimiter, async (req, res) => {
+router.post('/', submitLimiter, async (req, res) => {
   try {
-    const { business_name, contact_person, phone, city, interested_in, estimated_quantity, message } = req.body;
-
-    if (!business_name || !contact_person || !phone) {
-      return res.status(400).json({ error: 'Business name, contact person, and phone are required' });
+    const { error, clean } = validateWholesale(req.body);
+    if (error) {
+      return res.status(400).json({ error });
     }
 
-    const result = await pool.query(
+    await pool.query(
       `INSERT INTO wholesale_inquiries (business_name, contact_person, phone, city, interested_in, estimated_quantity, message)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [business_name, contact_person, phone, city || null, interested_in || null, estimated_quantity || null, message || null]
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [clean.business_name, clean.contact_person, clean.phone, clean.city, clean.interested_in, clean.estimated_quantity, clean.message]
     );
 
-    res.json({ message: 'Inquiry submitted successfully', inquiry: result.rows[0] });
+    res.json({ message: 'Inquiry submitted successfully' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Wholesale inquiry error:', err);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
 
@@ -40,6 +50,11 @@ router.patch('/:id/status', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
+
+    if (!STATUSES.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
     const result = await pool.query(
       'UPDATE wholesale_inquiries SET status = $1 WHERE id = $2 RETURNING *',
       [status, id]
