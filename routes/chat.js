@@ -5,6 +5,9 @@ const pool = require('../config/db');
 
 const WHATSAPP_URL = 'https://wa.me/923001234567';
 
+// Pehla model fail ho (quota / server issue) to doosra try hoga
+const MODELS = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
+
 const chatLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
@@ -165,6 +168,47 @@ function buildContents(history, message) {
   return cleaned;
 }
 
+async function callGemini(model, apiKey, systemText, contents) {
+  const response = await fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemText }] },
+        contents,
+        generationConfig: { maxOutputTokens: 2048, temperature: 0.3 },
+      }),
+    }
+  );
+
+  let data = {};
+  try {
+    data = await response.json();
+  } catch (err) {
+    data = {};
+  }
+  return { ok: response.ok, status: response.status, data };
+}
+
+function extractReply(data) {
+  const candidate = data && data.candidates && data.candidates[0];
+  const parts = (candidate && candidate.content && candidate.content.parts) || [];
+  const text = parts
+    .filter((p) => p.text && !p.thought)
+    .map((p) => p.text)
+    .join('')
+    .trim();
+  const finishReason =
+    (candidate && candidate.finishReason) ||
+    (data && data.promptFeedback && data.promptFeedback.blockReason) ||
+    'none';
+  return { text, finishReason };
+}
+
 router.post('/', chatLimiter, async (req, res) => {
   const fallbackMessage = 'Chat is temporarily unavailable. Please message us on [WhatsApp](' + WHATSAPP_URL + ').';
 
@@ -177,51 +221,47 @@ router.post('/', chatLimiter, async (req, res) => {
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      return res.status(500).json({ error: fallbackMessage });
+      console.error('GEMINI_API_KEY is not set on the server');
+      return res.status(500).json({ error: fallbackMessage, reason: 'no_api_key' });
     }
 
     const knowledge = await buildStoreKnowledge();
     const systemText = knowledge ? SYSTEM_PROMPT + '\n\n' + knowledge : SYSTEM_PROMPT;
     const contents = buildContents(history, message.trim().slice(0, 500));
 
-    const response = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
-        },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: systemText }] },
-          contents,
-          generationConfig: { maxOutputTokens: 800, temperature: 0.3 },
-        }),
+    let lastReason = 'unknown';
+
+    for (const model of MODELS) {
+      try {
+        const result = await callGemini(model, apiKey, systemText, contents);
+
+        if (!result.ok) {
+          const googleMessage = result.data && result.data.error && result.data.error.message;
+          console.error('Gemini error [' + model + '] status ' + result.status + ':', googleMessage || result.data);
+          lastReason = model + ':http_' + result.status;
+
+          // Quota / server / model-not-found par doosra model try karte hain
+          if ([404, 429, 500, 503].includes(result.status)) continue;
+          break;
+        }
+
+        const { text, finishReason } = extractReply(result.data);
+        if (text) {
+          return res.json({ reply: text });
+        }
+
+        console.error('Gemini empty reply [' + model + '] finishReason:', finishReason);
+        lastReason = model + ':empty_reply_' + finishReason;
+      } catch (err) {
+        console.error('Gemini request failed [' + model + ']:', err);
+        lastReason = model + ':network_error';
       }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error('Gemini API error:', data);
-      return res.status(503).json({ error: fallbackMessage });
     }
 
-    const parts = data.candidates?.[0]?.content?.parts || [];
-    const reply = parts
-      .filter((p) => p.text && !p.thought)
-      .map((p) => p.text)
-      .join('')
-      .trim();
-
-    if (!reply) {
-      return res.status(503).json({ error: fallbackMessage });
-    }
-
-    res.json({ reply });
+    return res.status(503).json({ error: fallbackMessage, reason: lastReason });
   } catch (err) {
     console.error('Chat error:', err);
-    res.status(500).json({ error: fallbackMessage });
+    res.status(500).json({ error: fallbackMessage, reason: 'server_error' });
   }
 });
 
