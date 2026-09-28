@@ -20,6 +20,7 @@ const exchangesRoute = require('./routes/exchanges');
 const chatRoute = require('./routes/chat');
 const adminChatRoute = require('./routes/adminChat');
 const cartCheckRoute = require('./routes/cartCheck');
+const orderRiskRoute = require('./routes/orderRisk');
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.use('/api/exchanges', exchangesRoute);
 app.use('/api/chat', chatRoute);
 app.use('/api/admin-chat', adminChatRoute);
 app.use('/api/cart-check', cartCheckRoute);
+app.use('/api/order-risk', orderRiskRoute);
 
 app.get('/', async (req, res) => {
   try {
