@@ -6,14 +6,16 @@ const pool = require('../config/db');
 const verifyCustomer = require('../middleware/customerAuth');
 const verifyAdmin = require('../middleware/auth');
 const { loginLimiter } = require('../middleware/rateLimiter');
-const { normalizePhone } = require('../utils/phoneHelper');
+const {
+  validateRegistration,
+  validateProfile,
+  validatePassword,
+  normalizePkPhone,
+  PHONE_ERROR,
+} = require('../utils/validators');
 
 const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
-
-function isValidPassword(password) {
-  return password && password.length >= 8 && /\d/.test(password);
-}
 
 function setCustomerCookie(res, customer) {
   const token = jwt.sign(
@@ -33,31 +35,36 @@ function setCustomerCookie(res, customer) {
 // Customer register karna
 router.post('/register', async (req, res) => {
   try {
-    const { name, phone, email, password } = req.body;
-    const normalizedPhone = normalizePhone(phone);
-
-    if (!name || !phone || !password) {
-      return res.status(400).json({ error: 'Name, phone, and password are required' });
-    }
-    if (!isValidPassword(password)) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters and include a number' });
+    const { error, clean } = validateRegistration(req.body);
+    if (error) {
+      return res.status(400).json({ error });
     }
 
+    // Purane accounts ka phone kisi bhi format mein ho, sirf digits se compare karte hain
     const existing = await pool.query(
-      'SELECT * FROM customers WHERE phone = $1 OR (email = $2 AND email IS NOT NULL)',
-      [normalizedPhone, email || null]
+      `SELECT phone, email FROM customers
+       WHERE regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = $1
+          OR ($2::text IS NOT NULL AND LOWER(email) = $2)`,
+      [clean.phone, clean.email]
     );
 
     if (existing.rows.length > 0) {
-      return res.status(400).json({ error: 'This phone or email is already registered' });
+      const phoneTaken = existing.rows.some(
+        (r) => String(r.phone || '').replace(/\D/g, '') === clean.phone
+      );
+      return res.status(400).json(
+        phoneTaken
+          ? { error: 'This phone number is already registered. Try logging in instead.', field: 'phone' }
+          : { error: 'This email is already registered. Try logging in instead.', field: 'email' }
+      );
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(clean.password, 10);
 
     const result = await pool.query(
       `INSERT INTO customers (name, phone, email, password_hash, is_guest)
        VALUES ($1, $2, $3, $4, false) RETURNING id, name, phone, email, token_version`,
-      [name, normalizedPhone, email || null, hashedPassword]
+      [clean.name, clean.phone, clean.email, hashedPassword]
     );
 
     const customer = result.rows[0];
@@ -69,6 +76,9 @@ router.post('/register', async (req, res) => {
     });
 
   } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: 'An account with these details already exists.' });
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -76,17 +86,31 @@ router.post('/register', async (req, res) => {
 // Customer login karna - phone ya email dono se
 router.post('/login', loginLimiter, async (req, res) => {
   try {
-    const { identifier, password } = req.body;
+    const identifierRaw = String(req.body.identifier == null ? '' : req.body.identifier).trim();
+    const password = String(req.body.password == null ? '' : req.body.password);
 
-    if (!identifier || !password) {
+    if (!identifierRaw || !password) {
       return res.status(400).json({ error: 'Please enter your phone/email and password' });
     }
 
-    const normalizedIdentifier = normalizePhone(identifier);
+    let phone = null;
+    let email = null;
+    if (identifierRaw.includes('@')) {
+      email = identifierRaw.toLowerCase();
+    } else {
+      phone = normalizePkPhone(identifierRaw);
+      if (!phone) {
+        return res.status(400).json({ error: PHONE_ERROR });
+      }
+    }
 
     const result = await pool.query(
-      'SELECT * FROM customers WHERE (phone = $1 OR phone = $2 OR email = $2) AND is_guest = false',
-      [normalizedIdentifier, identifier]
+      `SELECT * FROM customers
+       WHERE is_guest = false AND (
+         ($1::text IS NOT NULL AND regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = $1)
+         OR ($2::text IS NOT NULL AND LOWER(email) = $2)
+       )`,
+      [phone, email]
     );
 
     if (result.rows.length === 0) {
@@ -147,13 +171,30 @@ router.get('/me', verifyCustomer, async (req, res) => {
 // Apni profile details update karna - PROTECTED
 router.put('/me', verifyCustomer, async (req, res) => {
   try {
-    const { name, email } = req.body;
+    const { error, clean } = validateProfile(req.body);
+    if (error) {
+      return res.status(400).json({ error });
+    }
+
+    if (clean.email) {
+      const duplicate = await pool.query(
+        'SELECT id FROM customers WHERE LOWER(email) = $1 AND id <> $2',
+        [clean.email, req.customer.id]
+      );
+      if (duplicate.rows.length > 0) {
+        return res.status(400).json({ error: 'This email is already used by another account.', field: 'email' });
+      }
+    }
+
     const result = await pool.query(
       'UPDATE customers SET name = $1, email = $2 WHERE id = $3 RETURNING id, name, phone, email',
-      [name, email, req.customer.id]
+      [clean.name, clean.email, req.customer.id]
     );
     res.json(result.rows[0]);
   } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: 'This email is already used by another account.', field: 'email' });
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -161,13 +202,19 @@ router.put('/me', verifyCustomer, async (req, res) => {
 // Apna password khud change karna - PROTECTED
 router.patch('/me/change-password', verifyCustomer, async (req, res) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const currentPassword = String(req.body.currentPassword == null ? '' : req.body.currentPassword);
+    const newPassword = String(req.body.newPassword == null ? '' : req.body.newPassword);
 
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Please provide current and new password' });
     }
-    if (!isValidPassword(newPassword)) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters and include a number' });
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError, field: 'newPassword' });
+    }
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ error: 'New password must be different from the current one.', field: 'newPassword' });
     }
 
     const result = await pool.query('SELECT * FROM customers WHERE id = $1', [req.customer.id]);
@@ -179,7 +226,7 @@ router.patch('/me/change-password', verifyCustomer, async (req, res) => {
     const passwordMatch = await bcrypt.compare(currentPassword, customer.password_hash);
 
     if (!passwordMatch) {
-      return res.status(401).json({ error: 'Current password is incorrect' });
+      return res.status(401).json({ error: 'Current password is incorrect', field: 'currentPassword' });
     }
 
     const newHash = await bcrypt.hash(newPassword, 10);
@@ -254,10 +301,11 @@ router.get('/admin/all', verifyAdmin, async (req, res) => {
 router.patch('/admin/:id/reset-password', verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { newPassword } = req.body;
+    const newPassword = String(req.body.newPassword == null ? '' : req.body.newPassword);
 
-    if (!isValidPassword(newPassword)) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters and include a number' });
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError });
     }
 
     const newHash = await bcrypt.hash(newPassword, 10);
@@ -276,12 +324,12 @@ router.patch('/admin/:id/reset-password', verifyAdmin, async (req, res) => {
   }
 });
 
-// Admin: customer delete karna (account only, orders "guest" ban jayenge) - PROTECTED
+// Admin: customer delete karna (account only, orders "guest" ban jayenge, ya sab kuch) - PROTECTED
 router.delete('/admin/:id', verifyAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
-    const { deleteOrders } = req.query; // 'true' ya 'false' string ki tarah aayega
+    const { deleteOrders } = req.query;
 
     await client.query('BEGIN');
 
@@ -291,17 +339,20 @@ router.delete('/admin/:id', verifyAdmin, async (req, res) => {
     }
 
     if (deleteOrders === 'true') {
-      // Poora delete: customer ke saath uske orders bhi
+      // Orders se juday records pehle hatane parte hain, warna database rok deta hai
+      await client.query(
+        'DELETE FROM coupon_usage WHERE customer_id = $1 OR order_id IN (SELECT id FROM orders WHERE customer_id = $1)',
+        [id]
+      );
+      await client.query('DELETE FROM exchange_requests WHERE order_id IN (SELECT id FROM orders WHERE customer_id = $1)', [id]);
       await client.query('DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE customer_id = $1)', [id]);
       await client.query('DELETE FROM orders WHERE customer_id = $1', [id]);
     } else {
-      // Sirf account delete, orders "guest" ban jayenge
+      await client.query('DELETE FROM coupon_usage WHERE customer_id = $1', [id]);
       await client.query('UPDATE orders SET customer_id = NULL WHERE customer_id = $1', [id]);
     }
 
-    // Wishlist aur coupon usage records hamesha delete honge (ye account-specific hain)
     await client.query('DELETE FROM wishlist WHERE customer_id = $1', [id]);
-    await client.query('DELETE FROM coupon_usage WHERE customer_id = $1', [id]);
     await client.query('DELETE FROM customers WHERE id = $1', [id]);
 
     await client.query('COMMIT');
@@ -313,6 +364,5 @@ router.delete('/admin/:id', verifyAdmin, async (req, res) => {
     client.release();
   }
 });
-
 
 module.exports = router;
