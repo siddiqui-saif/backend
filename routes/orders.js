@@ -8,6 +8,7 @@ const { validateCheckout } = require('../utils/validators');
 const MAX_ITEMS_PER_ORDER = 30;
 const MAX_QTY_PER_ITEM = 20;
 const ALLOWED_SOURCES = ['Website', 'WhatsApp', 'Phone Call', 'Word of Mouth', 'Other'];
+const CANCEL_REASONS = ['Refused at delivery', 'Unreachable', 'Fake order', 'Customer changed mind', 'Out of stock', 'Other'];
 
 function generateTrackingCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -411,12 +412,21 @@ router.patch('/:id/confirm-call', verifyAdmin, async (req, res) => {
   }
 });
 
-// Order cancel karna - PROTECTED
+// Order cancel karna (wajah ke sath, wajah zaroori nahi) - PROTECTED
 router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
+  const { id } = req.params;
+
+  let cancelReason = null;
+  const reasonRaw = req.body && req.body.reason;
+  if (reasonRaw !== undefined && reasonRaw !== null && reasonRaw !== '') {
+    if (!CANCEL_REASONS.includes(reasonRaw)) {
+      return res.status(400).json({ error: 'Invalid cancel reason' });
+    }
+    cancelReason = reasonRaw;
+  }
+
   const client = await pool.connect();
   try {
-    const { id } = req.params;
-
     await client.query('BEGIN');
 
     const orderCheck = await client.query('SELECT * FROM orders WHERE id = $1', [id]);
@@ -457,8 +467,8 @@ router.patch('/:id/cancel', verifyAdmin, async (req, res) => {
     }
 
     const result = await client.query(
-      'UPDATE orders SET status = $1 WHERE id = $2 RETURNING *',
-      ['Cancelled', id]
+      'UPDATE orders SET status = $1, cancel_reason = $2 WHERE id = $3 RETURNING *',
+      ['Cancelled', cancelReason, id]
     );
 
     await client.query('COMMIT');
